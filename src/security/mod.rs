@@ -1,1 +1,1 @@
-mod hashing;
+pub mod hashing;

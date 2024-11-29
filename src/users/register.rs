@@ -13,6 +13,7 @@ use scylla::{QueryResult, Session};
 use scylla::transport::errors::QueryError;
 use uuid::Uuid;
 use scylla::frame::response::result::Row;
+use crate::security;
 
 #[derive(Deserialize, Serialize)]
 pub struct PostData {
@@ -26,7 +27,7 @@ pub struct PostData {
 pub enum ResponseData{
     Success {
         jwt: String,
-        userId: String,
+        user_id: String,
     },
     Error {
         message: String,
@@ -45,18 +46,18 @@ pub async fn register(db: &State<Db>, mut body: Json<PostData>) -> status::Custo
     } else if body.email.len() <= 3 || !body.email.contains("@") {
         status::Custom(Status::BadRequest, Json(ResponseData::Error { message: "Email is incorrect!".to_string() }))
     }else{
-        match checkIfUsed(db, &body.username).await {
+        match check_if_used(db, &body.username).await {
             Ok(val) => {
                 if val {
                     status::Custom(Status::BadRequest, Json(ResponseData::Error{
                         message: String::from("Username is already used"),
                     }))
                 }else{
-                    match createUser(db, &body).await {
+                    match create_user(db, &body).await {
                         Ok((userId, jwt)) => {
                             status::Custom(Status::Ok, Json(ResponseData::Success {
                                 jwt: jwt.to_string(),
-                                userId: userId.to_string(),
+                                user_id: userId.to_string(),
                             }))
                         },
                         Err(_) => {
@@ -77,19 +78,27 @@ pub async fn register(db: &State<Db>, mut body: Json<PostData>) -> status::Custo
 
 }
 
-async fn createUser(db: &State<Db>, body: &PostData) -> Result<(Uuid, Uuid), DynError>{
+async fn create_user(db: &State<Db>, body: &PostData) -> Result<(Uuid, Uuid), DynError>{
     let userid = Uuid::new_v4();
     let jwt = Uuid::new_v4();
-
-    let query = db.query_unpaged(
-        "INSERT INTO joltamp.users (createdat, user_id, username, displayname, email, isadmin, jwt, password, status)
+    let password_hash = security::hashing::hash_password(&body.password);
+    match password_hash {
+        Ok(val) => {
+            let query = db.query_unpaged(
+                "INSERT INTO joltamp.users (createdat, user_id, username, displayname, email, isadmin, jwt, password, status)
         VALUES ('25-11-2024', ?, ?, ?, ?, false, ?, ?, 0)",
-        (userid, &body.username, &body.username, &body.email, jwt, &body.password),
-    ).await;
+                (userid, &body.username, &body.username, &body.email.to_lowercase(), jwt, val),
+            ).await;
 
-    match query {
-        Ok(_) => {
-            Ok((userid, jwt))
+            match query {
+                Ok(_) => {
+                    Ok((userid, jwt))
+                }
+                Err(e) => {
+                    println!("error: {:?}", e);
+                    Err("Error creating user".into())
+                }
+            }
         }
         Err(e) => {
             println!("error: {:?}", e);
@@ -98,13 +107,12 @@ async fn createUser(db: &State<Db>, body: &PostData) -> Result<(Uuid, Uuid), Dyn
     }
 }
 
-async fn checkIfUsed(db: &State<Db>, username: &String) -> Result<bool, DynError> {
+async fn check_if_used(db: &State<Db>, username: &String) -> Result<bool, DynError> {
     let mut res = db.query_iter("SELECT username, user_id FROM joltamp.users WHERE username = ? LIMIT 1 ALLOW FILTERING", (&username, ))
         .await?.rows_stream::<(String, Uuid)>()?;
 
     let mut used: bool = false;
-    while let Some(row) = res.next().await {
-        let (username, user_id) = row?;
+    while let Some(_) = res.next().await {
         used = true;
         break;
     }
